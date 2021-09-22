@@ -1,78 +1,72 @@
-import numpy as np
-import h5py
-from typing import List, Tuple
 import logging
-import os
 
-from mpm_sim.utils import load_nifty, preprocess_array
+import lxml.etree as et
+import h5py
+
+from mpm_sim.utils import *
 
 
-def dims_slicing(slicing: Tuple[slice, slice, slice]) -> int:
-    if 1 in [slice_dim.stop - slice_dim.start
-             if slice_dim.stop is not None and slice_dim.start is not None else 0
-             for slice_dim in slicing]:
-        return 2
+BIAS_INTERPOLATION = 1
+
+
+def register_coil(coil_xml_path: Path, extent: float, points: int, dim: int = 3, overwrite: bool = False):
+    """Register coil, which means referencing the RX or TX field of the coil in the coil array file."""
+
+    if coil_xml_path.exists() and overwrite is False:
+        logging.info("Append new coil to coil array file.")
+        parser = et.XMLParser(remove_blank_text=True)
+        coil_array = et.parse(str(coil_xml_path), parser).getroot()
     else:
-        return 3
+        if overwrite is True:
+            logging.info("Replace old coil array file.")
+        else:
+            logging.info("Create new coil array file.")
+        coil_array = et.Element('CoilArray')
+
+    external_coil = et.SubElement(coil_array, 'EXTERNALCOIL')
+    map_name = f"{coil_xml_path.stem}_coil_{len(coil_array.getchildren()) - 1}"
+    map_path = full_dir(coil_xml_path) / Path(map_name).with_suffix('.h5')
+    external_coil.set('Name', map_name)
+    external_coil.set('Dim', str(dim))
+    external_coil.set('Points', str(points))
+    external_coil.set('Extent', str(extent))
+    external_coil.set('Filename', str(map_path))
+
+    print(et.tostring(coil_array))
+
+    xml_string = et.tostring(coil_array, pretty_print=True, encoding='utf-8', xml_declaration=True)
+
+    with coil_xml_path.open(mode='wb') as xml:
+        xml.write(xml_string)
+
+    return map_path
 
 
-def generate_coil_xml(dim: int = 3, extent: float = 248, filename='sensmaps.h5',
-                      points: int = 496, n_coils: int = 2):
-    j = ''
-    extcoil = j.join([
-        f'\t<EXTERNALCOIL Dim="{dim}" Extent="{extent}" Filename="{f"{coil}" + filename}" Name="C{coil}" Points="{points}"/>\n'
-        for coil in range(1, n_coils + 1)
-    ])
-    return f'<?xml version="1.0" encoding="utf-8"?>\n<CoilArray>\n{extcoil}</CoilArray>'
+def sensmap(coil_xml_path: Path, magmap: str, phasemap: str, **kwargs):
+    """Import sensitivity maps from nifti format.
 
+    In Jemris, the files for coil configuration (xml) and field data (h5) are identical for RX and TX coils.
+    """
 
-def square(data_magmap, data_phasemap):
-    edge_size = max(data_magmap.shape)
-    pad = tuple(
-        (0, edge_size - dim_size) if dim_size != 1 else (0, 0) for dim_size in data_magmap.shape
-    )
-    data_magmap = np.pad(data_magmap, pad,
-                         'linear_ramp', end_values=0)
-    data_phasemap = np.pad(data_phasemap, pad,
-                           'linear_ramp', end_values=0)
-    return data_magmap, data_phasemap, edge_size
+    kwargs = check_array_defaults(kwargs)
 
+    logging.info(f'Preprocess map data...')
+    slices = get_slicing(kwargs)
+    data_magmap = resample_simulation_volume(load_nifti(magmap)[0], slices, kwargs['transpose'], BIAS_INTERPOLATION)
+    data_phasemap = resample_simulation_volume(load_nifti(phasemap)[0], slices, kwargs['transpose'], BIAS_INTERPOLATION)
 
-def write_nifti_sensmap(magmaps_nii: List[str], phasemaps_nii: List[str], outdir: str,
-                        sensmap_name: str, coil_xml: str,
-                        n_coils=1, slicing=(slice(None, None),
-                                            slice(None, None),
-                                            slice(None, None)),
-                        transpose_array: Tuple[int, int, int] = (0, 1, 2),
-                        interpolation_factor: int = 1,  resolution: float = 0.5) -> np.ndarray:
-    try:
-        test_arr = preprocess_array(load_nifty(magmaps_nii[0])[0], slicing,
-                                    transpose_array, interpolation_factor)
-        edge_size = max(test_arr.shape)
-    except IndexError as err:
-        logging.error("The file lists must not be empty")
-        raise
+    data_magmap = data_magmap.squeeze()
+    data_phasemap = data_phasemap.squeeze()
+    assert data_magmap.shape == data_phasemap.shape
 
-    for idx, (magmap_nii, phasemap_nii) in enumerate(zip(magmaps_nii, phasemaps_nii)):
-        data_magmap, data_phasemap, edge_size = square(
-            # load_nifty(...)[0] is just the data, without the header
-            data_magmap=preprocess_array(load_nifty(magmap_nii)[0], slicing,
-                                         transpose_array, interpolation_factor),
-            data_phasemap=preprocess_array(load_nifty(phasemap_nii)[0], slicing, transpose_array,
-                                           interpolation_factor)
-        )
-        if dims_slicing(slicing) == 2:
-            data_magmap = np.reshape(data_magmap, (edge_size, edge_size))
-            data_phasemap = np.reshape(data_phasemap, (edge_size, edge_size))
-        with h5py.File(os.path.join(outdir, f"{idx+1}" + sensmap_name), 'w') as hf:
-            maps = hf.create_group('maps')
-            maps.create_dataset('magnitude', data=data_magmap.transpose())
-            maps.create_dataset('phase', data=data_phasemap.transpose())
-            logging.info(f'Convering sensmaps: {magmap_nii} and {phasemap_nii}')
-    with open(coil_xml, mode='w') as xml:
-        xml.write(generate_coil_xml(
-            n_coils=n_coils, filename=sensmap_name,
-            points=edge_size, extent=edge_size*resolution,
-            dim=dims_slicing(slicing)
-        ))
-    return test_arr
+    logging.info(f'Write coil XML file (location: {coil_xml_path})...')
+    dims = len(data_magmap.shape)
+    num_points = max(data_magmap.shape)  # Jemris treats the fields as if they were square shaped
+    extent = num_points * kwargs['resolution']
+    map_path = register_coil(coil_xml_path, extent=extent, points=num_points, dim=dims, overwrite=kwargs['overwrite'])
+
+    logging.info(f'Writing maps to HDF5 (location: {map_path.absolute()})...')
+    with h5py.File(map_path, 'w') as hf:
+        maps = hf.create_group('maps')
+        maps.create_dataset('magnitude', data=data_magmap.transpose())
+        maps.create_dataset('phase', data=data_phasemap.transpose())

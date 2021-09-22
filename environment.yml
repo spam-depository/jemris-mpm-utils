@@ -1,4 +1,4 @@
-name: jemris
+name: mpm-sim
 channels:
   - conda-forge
   - defaults
@@ -12,3 +12,5 @@ dependencies:
   - setuptools=50.3.1
   - click=7.1.2
   - conda-build
+  - lxml
+  - pytest
