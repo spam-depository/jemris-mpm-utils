@@ -82,9 +82,9 @@ def write_kspace(signals_path, **kwargs):
             kspace[:, echo, :, :, :] = np.flip(kspace[:, echo, :, :, :], axis=0)
 
     kspace_file_path = full_dir(signals_path) / "kspace"
-    logging.info("Writing kspace to: ", kspace_file_path)
-    logging.info("Shape of kspace data: ", kspace.shape)
-    writecfl(kspace_file_path, kspace)
+    logging.info("Writing kspace to: %s", kspace_file_path)
+    logging.info("Shape of kspace data: %s", kspace.shape)
+    writecfl(str(kspace_file_path), kspace)
 
     if plot:
         idx_plot_channel = 0

@@ -1,5 +1,6 @@
 import logging
 
+from pathlib import Path
 import lxml.etree as et
 import h5py
 
